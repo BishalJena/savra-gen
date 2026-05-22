@@ -59,7 +59,10 @@ export default function JobStatus({ jobId, onReset }: Props) {
     return (
       <div className="status-card">
         <div className="status-header">
-          <h3>Connecting...</h3>
+          <div>
+            <p className="eyebrow">Export</p>
+            <h3>Connecting</h3>
+          </div>
           <span className="status-tag queued">INITIALIZING</span>
         </div>
       </div>
@@ -71,11 +74,14 @@ export default function JobStatus({ jobId, onReset }: Props) {
   return (
     <div className="status-card">
       <div className="status-header">
-        <h3>
-          {status.status === 'done' ? 'Presentation Ready' :
-           status.status === 'failed' ? 'Generation Failed' :
-           'Generating Presentation'}
-        </h3>
+        <div>
+          <p className="eyebrow">Export</p>
+          <h3>
+            {status.status === 'done' ? 'Presentation ready' :
+             status.status === 'failed' ? 'Generation failed' :
+             'Generating presentation'}
+          </h3>
+        </div>
         <span className={`status-tag ${status.status}`}>
           {status.status === 'done' ? 'Done' :
            status.status === 'failed' ? 'FAILED' :
@@ -133,7 +139,7 @@ export default function JobStatus({ jobId, onReset }: Props) {
             </div>
           )}
 
-          <div style={{ display: 'flex', flexWrap: 'wrap' }}>
+          <div className="status-actions">
             <a
               href={getDownloadUrl(jobId)}
               className="btn-download"
@@ -142,7 +148,7 @@ export default function JobStatus({ jobId, onReset }: Props) {
               Download PPTX
             </a>
             <button className="btn-new" onClick={onReset}>
-              + New Presentation
+              New Presentation
             </button>
           </div>
         </>

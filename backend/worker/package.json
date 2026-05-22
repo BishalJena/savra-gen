@@ -4,10 +4,11 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "npm run build --prefix ../../packages/shared && tsc",
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@savra/shared": "file:../../packages/shared",
     "@anthropic-ai/sdk": "^0.52.0",
     "bullmq": "^5.38.0",
     "dotenv": "^17.4.2",

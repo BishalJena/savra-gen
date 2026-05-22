@@ -5,29 +5,15 @@ import { pptQueue } from '../lib/queue';
 import { generateCacheKey, getCacheStats, resolvePresentation } from '../lib/cache';
 import { listChapters, recordChapter } from '../lib/chapters';
 import { buildDraftOutline, generateApprovedCacheKey, validatePresentation } from '../lib/outline';
+import { populateSlide } from '../lib/populate-slide';
 import type { GenerateFromOutlineRequest, PptRequest, PptJobData } from '../shared';
 import { parsePptRequest } from '../shared';
+import { createStorage } from '../lib/storage';
+import { checkRateLimit, releaseDedupReservation, reserveOrGetDuplicateJob } from '../lib/request-guards';
 import path from 'path';
 import fs from 'fs';
 
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-const RATE_LIMIT = 10;
-const RATE_WINDOW = 60 * 1000;
-
-function checkRateLimit(clientId: string): boolean {
-  const now = Date.now();
-  const entry = rateLimitMap.get(clientId);
-  if (!entry || now > entry.resetAt) {
-    rateLimitMap.set(clientId, { count: 1, resetAt: now + RATE_WINDOW });
-    return true;
-  }
-  if (entry.count >= RATE_LIMIT) return false;
-  entry.count++;
-  return true;
-}
-
-const recentRequests = new Map<string, { jobId: string; timestamp: number }>();
-const DEDUP_WINDOW = 30 * 1000;
+const storage = createStorage({ localDir: path.join(process.cwd(), '..', 'worker', 'output') });
 
 const pptBodySchema = {
   type: 'object',
@@ -61,10 +47,11 @@ export async function pptRoutes(fastify: FastifyInstance) {
     schema: { body: pptBodySchema },
   }, async (request: FastifyRequest<{ Body: Record<string, unknown> }>, reply: FastifyReply) => {
     const clientId = request.ip || 'unknown';
-    if (!checkRateLimit(clientId)) {
+    const rateLimit = await checkRateLimit(clientId);
+    if (!rateLimit.allowed) {
       return reply.status(429).send({
         error: 'Too many requests. Please wait a moment before drafting another outline.',
-        retryAfterSeconds: 60,
+        retryAfterSeconds: rateLimit.retryAfterSeconds,
       });
     }
 
@@ -87,14 +74,71 @@ export async function pptRoutes(fastify: FastifyInstance) {
     });
   });
 
+  fastify.post('/api/ppt/slide/populate', async (
+    request: FastifyRequest<{ Body: Record<string, unknown> }>,
+    reply: FastifyReply,
+  ) => {
+    const clientId = request.ip || 'unknown';
+    const rateLimit = await checkRateLimit(clientId);
+    if (!rateLimit.allowed) {
+      return reply.status(429).send({
+        error: 'Too many requests. Please wait before populating another slide.',
+        retryAfterSeconds: rateLimit.retryAfterSeconds,
+      });
+    }
+
+    const parsed = parsePptRequest(request.body);
+    if (!parsed.chapter) {
+      return reply.status(400).send({ error: 'chapter is required' });
+    }
+
+    const presentation = request.body.presentation;
+    const slideIndex = Number(request.body.slideIndex);
+    const slideType = String(request.body.slideType || 'bullet-list');
+    const intent = String(request.body.intent || '').trim();
+    const activityRole = request.body.activityRole
+      ? String(request.body.activityRole)
+      : undefined;
+
+    if (!presentation || typeof presentation !== 'object' || !Array.isArray((presentation as any).slides)) {
+      return reply.status(400).send({ error: 'presentation with slides array is required' });
+    }
+    if (!Number.isInteger(slideIndex) || slideIndex < 0) {
+      return reply.status(400).send({ error: 'slideIndex must be a non-negative integer' });
+    }
+
+    const validTypes = ['title', 'bullet-list', 'two-column', 'content-with-image', 'quote-or-definition', 'quiz'];
+    if (!validTypes.includes(slideType)) {
+      return reply.status(400).send({ error: `slideType must be one of: ${validTypes.join(', ')}` });
+    }
+
+    try {
+      const validRoles = ['quiz', 'discussion', 'definition', 'visual', 'general'];
+      const role = activityRole && validRoles.includes(activityRole) ? activityRole : undefined;
+
+      const result = await populateSlide({
+        ...parsed,
+        slideIndex,
+        slideType: slideType as any,
+        intent,
+        activityRole: role as any,
+        presentation: presentation as GenerateFromOutlineRequest['presentation'],
+      });
+      return reply.send(result);
+    } catch (err: any) {
+      return reply.status(400).send({ error: err.message || 'Populate failed' });
+    }
+  });
+
   fastify.post('/api/ppt/generate', {
     schema: { body: pptBodySchema },
   }, async (request: FastifyRequest<{ Body: Record<string, unknown> }>, reply: FastifyReply) => {
     const clientId = request.ip || 'unknown';
-    if (!checkRateLimit(clientId)) {
+    const rateLimit = await checkRateLimit(clientId);
+    if (!rateLimit.allowed) {
       return reply.status(429).send({
         error: 'Too many requests. Please wait a moment before generating another PPT.',
-        retryAfterSeconds: 60,
+        retryAfterSeconds: rateLimit.retryAfterSeconds,
       });
     }
 
@@ -122,19 +166,18 @@ export async function pptRoutes(fastify: FastifyInstance) {
       : generateCacheKey(parsed);
 
     const dedupKey = cacheKey;
-    const recent = recentRequests.get(dedupKey);
-    if (recent && Date.now() - recent.timestamp < DEDUP_WINDOW) {
-      fastify.log.info({ jobId: recent.jobId }, 'Deduplication hit — returning existing job');
+    const jobId = randomUUID().substring(0, 8);
+    const dedupe = await reserveOrGetDuplicateJob(dedupKey, jobId);
+    if (!dedupe.reserved && dedupe.jobId) {
+      fastify.log.info({ jobId: dedupe.jobId }, 'Deduplication hit — returning existing job');
       return reply.status(200).send({
-        jobId: recent.jobId,
+        jobId: dedupe.jobId,
         status: 'queued',
         deduplicated: true,
         estimatedSeconds: 15,
-        pollUrl: `/api/ppt/job/${recent.jobId}`,
+        pollUrl: `/api/ppt/job/${dedupe.jobId}`,
       });
     }
-
-    const jobId = randomUUID().substring(0, 8);
 
     const jobData: PptJobData = {
       chapter: parsed.chapter,
@@ -147,8 +190,12 @@ export async function pptRoutes(fastify: FastifyInstance) {
       approvedPresentation,
     };
 
-    await pptQueue.add('generate-ppt', jobData, { jobId, priority: 1 });
-    recentRequests.set(dedupKey, { jobId, timestamp: Date.now() });
+    try {
+      await pptQueue.add('generate-ppt', jobData, { jobId, priority: 1 });
+    } catch (err) {
+      await releaseDedupReservation(dedupKey, jobId);
+      throw err;
+    }
 
     fastify.log.info(
       { jobId, chapter: parsed.chapter, grade: parsed.grade, subject: parsed.subject, numSlides: parsed.numSlides },
@@ -206,6 +253,14 @@ export async function pptRoutes(fastify: FastifyInstance) {
     reply: FastifyReply,
   ) => {
     const { jobId } = request.params;
+    const job = await pptQueue.getJob(jobId);
+    const stored = job?.returnvalue?.storage;
+    if (stored?.driver === 'r2' && stored.objectKey) {
+      const signedUrl = await storage.downloadUrl(stored.objectKey, 300);
+      if (!signedUrl) return reply.status(404).send({ error: 'File not found. It may have been cleaned up.' });
+      return reply.redirect(signedUrl);
+    }
+
     const outputDir = path.join(process.cwd(), '..', 'worker', 'output');
     const filePath = path.join(outputDir, `${jobId}.pptx`);
 
@@ -213,7 +268,6 @@ export async function pptRoutes(fastify: FastifyInstance) {
       return reply.status(404).send({ error: 'File not found. It may have been cleaned up.' });
     }
 
-    const job = await pptQueue.getJob(jobId);
     const chapter = job?.data?.chapter || 'presentation';
     const filename = `${chapter.replace(/[^a-zA-Z0-9]/g, '_')}_Class${job?.data?.grade || ''}.pptx`;
 

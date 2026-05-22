@@ -7,7 +7,13 @@ export interface GenerateRequest {
   numSlides: number;
 }
 
-export type SlideType = 'title' | 'bullet-list' | 'two-column' | 'content-with-image' | 'quote-or-definition';
+export type SlideType =
+  | 'title'
+  | 'bullet-list'
+  | 'two-column'
+  | 'content-with-image'
+  | 'quote-or-definition'
+  | 'quiz';
 
 export interface SlideData {
   slideType: SlideType;
@@ -18,6 +24,7 @@ export interface SlideData {
   rightContent?: string;
   quoteText?: string;
   speakerNote?: string;
+  quizQuestions?: Array<{ question: string; options: string[] }>;
 }
 
 export interface PresentationData {
@@ -36,7 +43,7 @@ export interface GenerateResponse {
 export interface OutlineResponse {
   presentation: PresentationData;
   cached: boolean;
-  strategy: string;
+  strategy: 'l1-cache' | 'l2-semantic' | 'llm' | 'template' | 'template-fallback' | string;
   similarityScore?: number;
   matchedChapter?: string;
   estimatedSecondsSaved: number;
@@ -63,6 +70,36 @@ export async function fetchChapters(grade: number, subject: string): Promise<str
   if (!res.ok) return [];
   const data = await res.json();
   return data.chapters || [];
+}
+
+export interface PopulateSlideResponse {
+  slide: SlideData;
+  strategy: 'llm' | 'template';
+  model?: string;
+  tokensUsed?: number;
+}
+
+export type SlideActivityRole = 'quiz' | 'discussion' | 'definition' | 'visual';
+
+export async function populateSlideContent(
+  data: GenerateRequest & {
+    presentation: PresentationData;
+    slideIndex: number;
+    slideType: SlideType;
+    intent: string;
+    activityRole?: SlideActivityRole;
+  },
+): Promise<PopulateSlideResponse> {
+  const res = await fetch(`${API_BASE}/ppt/slide/populate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Request failed' }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
 }
 
 export async function draftOutline(data: GenerateRequest): Promise<OutlineResponse> {

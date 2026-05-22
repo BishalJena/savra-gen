@@ -2,6 +2,7 @@
 // Takes structured JSON from LLM and injects into pre-designed templates
 // This is the key cost optimization: LLM generates content only, layout is deterministic
 import PptxGenJS from 'pptxgenjs';
+import { getQuizQuestions } from '@savra/shared';
 import { SLIDE_TEMPLATES, COLORS } from './templates';
 import type { PresentationData, SlideData } from './shared';
 import path from 'path';
@@ -88,9 +89,8 @@ function addBulletSlide(pptx: PptxGenJS, slide: SlideData) {
     fill: { color: COLORS.accent },
   });
 
-  // Bullets
   if (slide.bullets && slide.bullets.length > 0 && tmpl.bulletConfig) {
-    const bulletItems = slide.bullets.map((b: string) => ({
+    const bulletItems = slide.bullets.map((b: string, i: number) => ({
       text: b,
       options: {
         fontSize: tmpl.bulletConfig!.fontSize,
@@ -98,13 +98,138 @@ function addBulletSlide(pptx: PptxGenJS, slide: SlideData) {
         bullet: { code: '25CF', color: COLORS.accent },
         lineSpacing: tmpl.bulletConfig!.lineSpacing,
         fontFace: 'Arial',
-        paraSpaceAfter: 8,
+        paraSpaceAfter: i < slide.bullets!.length - 1 ? 10 : 4,
+        indentLevel: 0,
       },
     }));
 
+    s.addShape(pptx.ShapeType.roundRect, {
+      x: 0.5, y: 1.28, w: 8.9, h: 4.15,
+      fill: { color: 'FFFFFF' },
+      line: { color: 'E5E7EB', width: 1 },
+      rectRadius: 0.08,
+    });
+
     s.addText(bulletItems, {
-      x: tmpl.bulletConfig.x, y: tmpl.bulletConfig.y,
-      w: tmpl.bulletConfig.w, h: tmpl.bulletConfig.h,
+      x: tmpl.bulletConfig.x + 0.15, y: tmpl.bulletConfig.y + 0.1,
+      w: tmpl.bulletConfig.w - 0.3, h: tmpl.bulletConfig.h - 0.15,
+    });
+  }
+
+  if (slide.speakerNote) s.addNotes(slide.speakerNote);
+}
+
+function addQuizSlide(pptx: PptxGenJS, slide: SlideData) {
+  const tmpl = SLIDE_TEMPLATES['quiz'];
+  const questions = getQuizQuestions(slide).slice(0, 3);
+  const s = pptx.addSlide();
+  s.background = { color: tmpl.background.color };
+
+  s.addShape(pptx.ShapeType.rect, {
+    x: 0, y: 0, w: 0.08, h: '100%',
+    fill: { color: COLORS.accent },
+  });
+
+  s.addText(slide.title, {
+    x: tmpl.titleConfig.x,
+    y: tmpl.titleConfig.y,
+    w: tmpl.titleConfig.w,
+    h: tmpl.titleConfig.h,
+    fontSize: tmpl.titleConfig.fontSize,
+    color: tmpl.titleConfig.color,
+    bold: true,
+    align: 'left',
+    fontFace: 'Arial',
+  });
+
+  s.addShape(pptx.ShapeType.rect, {
+    x: 0.6, y: 1.05, w: 2, h: 0.03,
+    fill: { color: COLORS.accent },
+  });
+
+  const blockHeight = questions.length <= 2 ? 1.55 : 1.22;
+  const startY = 1.25;
+
+  questions.forEach((q, index) => {
+    const cardY = startY + index * blockHeight;
+
+    s.addShape(pptx.ShapeType.roundRect, {
+      x: 0.55,
+      y: cardY,
+      w: 8.9,
+      h: blockHeight - 0.12,
+      fill: { color: 'FFFFFF' },
+      line: { color: 'DDD6FE', width: 1 },
+      rectRadius: 0.08,
+    });
+
+    s.addShape(pptx.ShapeType.roundRect, {
+      x: 0.7,
+      y: cardY + 0.12,
+      w: 0.55,
+      h: 0.38,
+      fill: { color: COLORS.accent },
+      rectRadius: 0.06,
+    });
+
+    s.addText(`Q${index + 1}`, {
+      x: 0.7,
+      y: cardY + 0.12,
+      w: 0.55,
+      h: 0.38,
+      fontSize: 12,
+      color: COLORS.white,
+      bold: true,
+      align: 'center',
+      valign: 'middle',
+      fontFace: 'Arial',
+    });
+
+    s.addText(q.question, {
+      x: 1.35,
+      y: cardY + 0.1,
+      w: 7.9,
+      h: 0.42,
+      fontSize: questions.length <= 2 ? 16 : 14,
+      color: COLORS.darkText,
+      bold: true,
+      fontFace: 'Arial',
+    });
+
+    const optionStartY = cardY + 0.52;
+    q.options.slice(0, 4).forEach((option, optIndex) => {
+      const letter = String.fromCharCode(65 + optIndex);
+      s.addText(letter, {
+        x: 0.85,
+        y: optionStartY + optIndex * 0.28,
+        w: 0.35,
+        h: 0.26,
+        fontSize: 12,
+        color: COLORS.accent,
+        bold: true,
+        fontFace: 'Arial',
+      });
+      s.addText(option, {
+        x: 1.25,
+        y: optionStartY + optIndex * 0.28,
+        w: 8.0,
+        h: 0.26,
+        fontSize: questions.length <= 2 ? 14 : 12,
+        color: '374151',
+        fontFace: 'Arial',
+      });
+    });
+  });
+
+  if (questions.length === 0) {
+    s.addText('Add quiz questions using Populate or the editor.', {
+      x: 0.8,
+      y: 2,
+      w: 8,
+      h: 1,
+      fontSize: 16,
+      color: COLORS.subtitle,
+      fontFace: 'Arial',
     });
   }
 
@@ -116,7 +241,11 @@ function addTwoColumnSlide(pptx: PptxGenJS, slide: SlideData) {
   const s = pptx.addSlide();
   s.background = { color: tmpl.background.color };
 
-  // Title
+  s.addShape(pptx.ShapeType.rect, {
+    x: 0, y: 0, w: 0.08, h: '100%',
+    fill: { color: COLORS.accent },
+  });
+
   s.addText(slide.title, {
     x: tmpl.titleConfig.x, y: tmpl.titleConfig.y,
     w: tmpl.titleConfig.w, h: tmpl.titleConfig.h,
@@ -127,45 +256,58 @@ function addTwoColumnSlide(pptx: PptxGenJS, slide: SlideData) {
     fontFace: 'Arial',
   });
 
-  // Divider line under title
   s.addShape(pptx.ShapeType.rect, {
     x: 2.5, y: 1.15, w: 5, h: 0.03,
     fill: { color: COLORS.accent },
   });
 
-  // Left panel with background
+  const isDiscussion = /discuss|think|pair|prompt|activity/i.test(slide.title + slide.leftContent + slide.rightContent);
+
   if (slide.leftContent && tmpl.leftPanelConfig) {
     s.addShape(pptx.ShapeType.roundRect, {
       x: tmpl.leftPanelConfig.x - 0.1, y: tmpl.leftPanelConfig.y - 0.1,
       w: tmpl.leftPanelConfig.w + 0.2, h: tmpl.leftPanelConfig.h + 0.2,
-      fill: { color: 'e8e0f5' }, rectRadius: 0.15,
+      fill: { color: 'EDE9FE' }, rectRadius: 0.12,
+      line: { color: 'DDD6FE', width: 1 },
+    });
+    s.addText(isDiscussion ? 'Prompt' : 'Column A', {
+      x: tmpl.leftPanelConfig.x, y: tmpl.leftPanelConfig.y - 0.05,
+      w: tmpl.leftPanelConfig.w, h: 0.35,
+      fontSize: 11, color: COLORS.accent, bold: true, fontFace: 'Arial',
     });
     s.addText(slide.leftContent, {
-      x: tmpl.leftPanelConfig.x, y: tmpl.leftPanelConfig.y,
-      w: tmpl.leftPanelConfig.w, h: tmpl.leftPanelConfig.h,
+      x: tmpl.leftPanelConfig.x, y: tmpl.leftPanelConfig.y + 0.35,
+      w: tmpl.leftPanelConfig.w, h: tmpl.leftPanelConfig.h - 0.35,
       fontSize: tmpl.leftPanelConfig.fontSize,
       color: tmpl.leftPanelConfig.color,
       align: 'left',
       valign: 'top',
       fontFace: 'Arial',
+      lineSpacing: 22,
     });
   }
 
-  // Right panel with background
   if (slide.rightContent && tmpl.rightPanelConfig) {
     s.addShape(pptx.ShapeType.roundRect, {
       x: tmpl.rightPanelConfig.x - 0.1, y: tmpl.rightPanelConfig.y - 0.1,
       w: tmpl.rightPanelConfig.w + 0.2, h: tmpl.rightPanelConfig.h + 0.2,
-      fill: { color: COLORS.darkBg }, rectRadius: 0.15,
+      fill: { color: COLORS.darkBg }, rectRadius: 0.12,
+      line: { color: COLORS.accent, width: 1 },
+    });
+    s.addText(isDiscussion ? 'Discuss / Answers' : 'Column B', {
+      x: tmpl.rightPanelConfig.x, y: tmpl.rightPanelConfig.y - 0.05,
+      w: tmpl.rightPanelConfig.w, h: 0.35,
+      fontSize: 11, color: COLORS.highlight, bold: true, fontFace: 'Arial',
     });
     s.addText(slide.rightContent, {
-      x: tmpl.rightPanelConfig.x, y: tmpl.rightPanelConfig.y,
-      w: tmpl.rightPanelConfig.w, h: tmpl.rightPanelConfig.h,
+      x: tmpl.rightPanelConfig.x, y: tmpl.rightPanelConfig.y + 0.35,
+      w: tmpl.rightPanelConfig.w, h: tmpl.rightPanelConfig.h - 0.35,
       fontSize: tmpl.rightPanelConfig.fontSize,
       color: COLORS.white,
       align: 'left',
       valign: 'top',
       fontFace: 'Arial',
+      lineSpacing: 22,
     });
   }
 
@@ -208,18 +350,42 @@ function addContentImageSlide(pptx: PptxGenJS, slide: SlideData) {
     });
   }
 
-  // Image placeholder (gray rounded rect with label)
   if (tmpl.rightPanelConfig) {
+    const px = tmpl.rightPanelConfig.x;
+    const py = tmpl.rightPanelConfig.y;
+    const pw = tmpl.rightPanelConfig.w;
+    const ph = tmpl.rightPanelConfig.h;
+
     s.addShape(pptx.ShapeType.roundRect, {
-      x: tmpl.rightPanelConfig.x, y: tmpl.rightPanelConfig.y,
-      w: tmpl.rightPanelConfig.w, h: tmpl.rightPanelConfig.h,
-      fill: { color: 'e2e8f0' }, rectRadius: 0.2,
-      line: { color: COLORS.subtitle, width: 1, dashType: 'dash' },
+      x: px, y: py, w: pw, h: ph,
+      fill: { color: 'F8FAFC' },
+      rectRadius: 0.15,
+      line: { color: 'CBD5E1', width: 1.5, dashType: 'dash' },
     });
-    s.addText('📷 Visual Aid', {
-      x: tmpl.rightPanelConfig.x, y: tmpl.rightPanelConfig.y + 1.5,
-      w: tmpl.rightPanelConfig.w, h: 0.8,
-      fontSize: 14, color: COLORS.subtitle, align: 'center', fontFace: 'Arial',
+    s.addShape(pptx.ShapeType.roundRect, {
+      x: px + 0.35, y: py + 0.5, w: pw - 0.7, h: ph - 2.2,
+      fill: { color: 'EDE9FE' },
+      rectRadius: 0.1,
+    });
+    s.addShape(pptx.ShapeType.rect, {
+      x: px + pw * 0.25, y: py + 1.1, w: pw * 0.5, h: 0.06,
+      fill: { color: COLORS.accent },
+    });
+    s.addShape(pptx.ShapeType.rect, {
+      x: px + pw * 0.2, y: py + 1.5, w: pw * 0.6, h: 1.2,
+      fill: { color: 'DDD6FE' },
+    });
+    s.addText('Visual', {
+      x: px, y: py + 0.65, w: pw, h: 0.4,
+      fontSize: 13, color: COLORS.accent, bold: true, align: 'center', fontFace: 'Arial',
+    });
+    s.addText('Diagram / image', {
+      x: px, y: py + 2.85, w: pw, h: 0.5,
+      fontSize: 12, color: COLORS.subtitle, align: 'center', fontFace: 'Arial',
+    });
+    s.addText('Add board sketch or textbook figure in class', {
+      x: px, y: py + ph - 0.55, w: pw, h: 0.35,
+      fontSize: 9, color: COLORS.subtitle, align: 'center', italic: true, fontFace: 'Arial',
     });
   }
 
@@ -248,9 +414,14 @@ function addQuoteSlide(pptx: PptxGenJS, slide: SlideData) {
     fontFace: 'Arial',
   });
 
-  // Quote/definition text
   const displayText = slide.quoteText || slide.bodyText || '';
   if (displayText && tmpl.bodyConfig) {
+    s.addShape(pptx.ShapeType.roundRect, {
+      x: 0.9, y: 1.55, w: 8.5, h: 3.35,
+      fill: { color: '1F2937' },
+      line: { color: COLORS.accent, width: 1 },
+      rectRadius: 0.1,
+    });
     s.addText(displayText, {
       x: tmpl.bodyConfig.x, y: tmpl.bodyConfig.y,
       w: tmpl.bodyConfig.w, h: tmpl.bodyConfig.h,
@@ -292,8 +463,15 @@ export async function buildPptx(
       case 'title':
         addTitleSlide(pptx, slide);
         break;
+      case 'quiz':
+        addQuizSlide(pptx, slide);
+        break;
       case 'bullet-list':
-        addBulletSlide(pptx, slide);
+        if (getQuizQuestions(slide).length > 0 && /quiz|mcq|check/i.test(slide.title)) {
+          addQuizSlide(pptx, slide);
+        } else {
+          addBulletSlide(pptx, slide);
+        }
         break;
       case 'two-column':
         addTwoColumnSlide(pptx, slide);

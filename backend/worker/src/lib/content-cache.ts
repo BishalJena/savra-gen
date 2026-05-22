@@ -6,12 +6,21 @@ import {
   type CacheEntry,
   type PptRequest,
 } from '../shared';
+import { buildDraftOutline } from '../shared';
 import { generateSlideContent, generateMockSlideContent } from '../llm';
 
 const CACHE_TTL = 7 * 24 * 60 * 60;
 const L2_INDEX_KEY = 'ppt:content:l2:index';
 const THRESHOLD = parseFloat(process.env.SEMANTIC_CACHE_THRESHOLD || '0.92');
 const STRICT_SLIDES_THRESHOLD = parseFloat(process.env.SEMANTIC_CACHE_STRICT_SLIDES_THRESHOLD || '0.97');
+
+interface FreshContentResult {
+  presentation: CacheEntry['presentation'];
+  model: string;
+  tokensUsed: number;
+  costINR: number;
+  cacheable: boolean;
+}
 
 function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length || a.length === 0) return 0;
@@ -120,7 +129,7 @@ export async function storePresentation(
   return cacheKey;
 }
 
-export async function generateFreshContent(req: PptRequest) {
+export async function generateFreshContent(req: PptRequest): Promise<FreshContentResult> {
   const useMock = !process.env.OPENAI_API_KEY && !process.env.ANTHROPIC_API_KEY;
   if (useMock) {
     const mock = generateMockSlideContent(req);
@@ -129,13 +138,26 @@ export async function generateFreshContent(req: PptRequest) {
       model: mock.model,
       tokensUsed: 0,
       costINR: 0,
+      cacheable: true,
     };
   }
-  const result = await generateSlideContent(req);
-  return {
-    presentation: result.presentation,
-    model: result.model,
-    tokensUsed: result.tokensUsed,
-    costINR: result.costINR,
-  };
+  try {
+    const result = await generateSlideContent(req);
+    return {
+      presentation: result.presentation,
+      model: result.model,
+      tokensUsed: result.tokensUsed,
+      costINR: result.costINR,
+      cacheable: true,
+    };
+  } catch (err) {
+    console.warn('[LLM] Worker generation failed; rendering template fallback:', err);
+    return {
+      presentation: buildDraftOutline(req),
+      model: 'template-fallback',
+      tokensUsed: 0,
+      costINR: 0,
+      cacheable: false,
+    };
+  }
 }

@@ -89,23 +89,36 @@ export async function resolvePresentation(req: PptRequest): Promise<ResolvedCont
   }
 
   if (hasLlmProvider()) {
-    const result = await generateSlideContent(req);
-    const entry: CacheEntry = {
-      presentation: result.presentation,
-      createdAt: new Date().toISOString(),
-      model: result.model,
-      tokensUsed: result.tokensUsed,
-    };
-    await setInCache(cacheKey, entry);
-    await indexL2Entry(req, cacheKey);
-    return {
-      presentation: result.presentation,
-      strategy: 'llm',
-      cached: false,
-      cacheKey,
-      model: result.model,
-      tokensUsed: result.tokensUsed,
-    };
+    try {
+      const result = await generateSlideContent(req);
+      const entry: CacheEntry = {
+        presentation: result.presentation,
+        createdAt: new Date().toISOString(),
+        model: result.model,
+        tokensUsed: result.tokensUsed,
+      };
+      await setInCache(cacheKey, entry);
+      await indexL2Entry(req, cacheKey);
+      return {
+        presentation: result.presentation,
+        strategy: 'llm',
+        cached: false,
+        cacheKey,
+        model: result.model,
+        tokensUsed: result.tokensUsed,
+      };
+    } catch (err) {
+      console.warn('[LLM] Outline generation failed; returning template fallback:', err);
+      const presentation = buildDraftOutline(req);
+      return {
+        presentation,
+        strategy: 'template-fallback',
+        cached: false,
+        cacheKey,
+        model: 'template-fallback',
+        tokensUsed: 0,
+      };
+    }
   }
 
   const presentation = buildDraftOutline(req);

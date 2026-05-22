@@ -1,6 +1,6 @@
 # System Architecture Diagram
 
-Mermaid source for the Savra PPT generation redesign ([ASSIGNMENT.md](../ASSIGNMENT.md) Part 1A). Renders in GitHub, VS Code, and most markdown viewers.
+Mermaid source for the Savra PPT generation redesign. Renders in GitHub, VS Code, and most markdown viewers.
 
 ## Outline-first async pipeline
 
@@ -12,6 +12,7 @@ flowchart LR
 
   subgraph frontend [frontend]
     UI[React UI]
+    Preview[Layout preview Review]
   end
 
   subgraph backend [backend]
@@ -30,8 +31,10 @@ flowchart LR
   PPTX[pptxgenjs]
 
   Browser --> UI
+  UI --> Preview
   UI -->|GET chapters| API
   UI -->|POST outline| API
+  UI -->|POST slide populate| API
   API --> Chapters
   API --> L1
   API --> L2
@@ -44,7 +47,7 @@ flowchart LR
   Worker --> L1
   Worker --> L2
   Worker -.->|cache miss, no approval| LLM
-  Worker -->|approved path 0 tokens| PPTX
+  Worker -->|approved path: 0 additional tokens| PPTX
   LLM -->|structured JSON| Worker
   Worker --> PPTX
   PPTX -->|download| UI
@@ -78,7 +81,13 @@ sequenceDiagram
   end
   API-->>UI: Editable presentation
 
-  T->>UI: Edit slides, add/delete
+  T->>UI: Edit slides, preview layout, optional Populate
+  opt Per-slide Populate
+    UI->>API: POST /api/ppt/slide/populate
+    API->>LLM: Fill one slide
+    LLM-->>API: Updated slide JSON
+    API-->>UI: slide
+  end
   UI->>API: POST /api/ppt/generate
   API-->>UI: jobId under 100ms
 
@@ -129,7 +138,7 @@ flowchart TB
 
   subgraph new [This redesign]
     N1[Fast outline + cache]
-    N2[Teacher reviews slides]
+    N2[Teacher reviews + layout preview]
     N3[Async job + retries]
     N4[PPTX download]
     N1 --> N2 --> N3 --> N4

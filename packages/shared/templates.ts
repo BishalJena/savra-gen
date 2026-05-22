@@ -113,6 +113,16 @@ export const SLIDE_TEMPLATES: Record<string, SlideTemplate> = {
     noteConfig: { fontSize: 12, color: COLORS.subtitle },
   },
 
+  'quiz': {
+    name: 'Quiz / MCQ',
+    background: { color: COLORS.lightBg },
+    titleConfig: {
+      x: 0.6, y: 0.28, w: 8.8, h: 0.75,
+      fontSize: 26, color: COLORS.darkText, bold: true, align: 'left',
+    },
+    noteConfig: { fontSize: 12, color: COLORS.subtitle },
+  },
+
   'quote-or-definition': {
     name: 'Quote / Key Concept',
     background: { color: COLORS.mediumBg },

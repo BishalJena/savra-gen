@@ -1,9 +1,11 @@
 # Savra PPT Generation — Engineering Architecture Document
 
-**Role:** Full-Stack Engineering Candidate  
-**Scope:** PPT Generation System Redesign ([ASSIGNMENT.md](../ASSIGNMENT.md))  
-**LLM Choice:** OpenAI (chat + L2 embeddings) and Anthropic (chat); assignment allows any provider  
-**Prototype status:** Outline-first async pipeline, L1+L2 cache, CBSE chapter catalog, slide add/delete — see [CHANGELOG.md](../CHANGELOG.md)
+| Field | Value |
+|---|---|
+| Role | Full-Stack Engineering Candidate |
+| Scope | PPT Generation System Redesign |
+| LLM Choice | OpenAI (chat + L2 embeddings) and Anthropic (chat); assignment allows any provider |
+| Prototype status | Outline-first async pipeline, L1+L2 cache, CBSE catalog, slide add/delete, layout preview, per-slide Populate, quiz layout — see [CHANGELOG.md](../CHANGELOG.md) |
 
 **Diagram:** See [`diagram.md`](diagram.md) for Mermaid architecture views (flowchart, sequence, cache layers).
 
@@ -16,7 +18,6 @@
 | Backend | [`backend/`](../backend/) — `api/` HTTP server + `worker/` queue consumer |
 | Frontend UI | [`frontend/`](../frontend/) |
 | Decisions + rationale | [`DECISIONS.md`](../DECISIONS.md) |
-| Pitch / demo script | [`PITCH_SCRIPT.md`](../PITCH_SCRIPT.md) |
 
 ---
 
@@ -59,8 +60,9 @@ If the LLM 503s, the teacher gets an error.
 ```
 Teacher submits form
   → API returns editable slide-level draft
-    → Teacher edits titles, bullets, examples, speaker notes
-      → Teacher clicks Generate PPTX
+    → Teacher edits titles, bullets, examples, speaker notes (layout preview on Review step)
+    → Optional: per-slide Populate (intent + format → one LLM call for that slide)
+      → Teacher clicks Export PPTX
         → HTTP POST returns in <100ms with a jobId
           → Background worker renders final PPTX
 Teacher's UI is never blocked, and teachers can correct content before final export.
@@ -100,11 +102,11 @@ This changes the entire failure surface. The teacher never sees a 503. The backe
 │             │                              │  2. Check L2 cache     │
 │             │                              │     (semantic embed)   │
 │             │                              │  3. Call LLM if needed │
-│             │                              │     (Haiku → Sonnet    │
+│             │                              │     (provider router   │
 │             │                              │      fallback)         │
 │             │                              │  4. Build PPTX         │
 │             │                              │     (pptxgenjs)        │
-│             │                              │  5. Store in S3/disk   │
+│             │                              │  5. Store local/R2     │
 │             │                              │  6. Update job status  │
 │  "✓ Ready   │    Job status = "done"       └────────────────────────┘
 │  Download"  │ ←────────────────────────────────────────────────────
@@ -131,19 +133,39 @@ Request:
 
 (`topic` accepted as deprecated alias for `chapter`.)
 
-Resolution order: **L1 exact cache → L2 semantic cache → LLM (if API key) → template (mock)**.
+Resolution order: **L1 exact cache → L2 semantic cache → LLM (if API key) → template fallback if provider fails → template mock when no key is configured**.
 
 Response:
 ```json
 {
   "presentation": { "presentationTitle": "...", "slides": [] },
   "cached": true,
-  "strategy": "l1-cache | l2-semantic | llm | template",
+  "strategy": "l1-cache | l2-semantic | llm | template | template-fallback",
   "similarityScore": 0.94,
   "matchedChapter": "Photosynthesis",
   "estimatedSecondsSaved": 20
 }
 ```
+
+**POST `/api/ppt/slide/populate`**
+
+Fills a single slide in an existing draft using deck context (teacher intent + format).
+
+Request (abbreviated):
+```json
+{
+  "chapter": "Photosynthesis",
+  "grade": 8,
+  "subject": "Science",
+  "presentation": { "presentationTitle": "...", "slides": [] },
+  "slideIndex": 3,
+  "intent": "3 MCQ on coal extraction and environmental impact",
+  "activityRole": "quiz",
+  "slideType": "quiz"
+}
+```
+
+Response: `{ "slide": { ... }, "strategy": "llm" }`. Format presets (Quiz / Discussion / Definition / Visual) map to `slideType` without overwriting teacher intent text.
 
 **POST `/api/ppt/generate`**
 
@@ -158,7 +180,7 @@ Request:
 }
 ```
 
-The same endpoint can also accept an approved `presentation` object. In that path, the worker renders directly from the teacher-approved slide JSON instead of making another LLM call.
+The same endpoint can also accept an approved `presentation` object. In that path, the worker renders directly from the teacher-approved slide JSON instead of making another LLM call. If direct one-shot generation has no approved outline and all providers fail, the worker renders a `template-fallback` PPTX instead of failing the job.
 
 Response (immediate, <100ms):
 ```json
@@ -271,7 +293,7 @@ Assumptions:
 | New system, 45% cache | 43,333 | ₹0.47 | ₹20,366 |
 | New system, 45% cache + Batch API* | 43,333 | ₹0.24 | ₹10,400 |
 
-*Anthropic's Batch API gives 50% off on async workloads — which this architecture already supports.
+*Provider batch APIs can discount async workloads, which this architecture already supports.
 
 **Bottom line:** The new system handles 14× the volume at less than half the current monthly cost.
 
@@ -324,7 +346,7 @@ numSlides (integer)
 | New system, no cache | ₹37,267 |
 | L1 ~30% hit | ₹26,087 |
 | L1 + L2 ~40.5% combined hit | ₹22,130 |
-| + 50% teacher-approved export (0 tokens) | ~₹11,065 |
+| + 50% teacher-approved export (0 additional LLM tokens after draft approval) | ~₹11,065 |
 
 Embedding cost is negligible (~$1/month) vs LLM savings.
 
@@ -355,14 +377,14 @@ Three retries with exponential backoff handle the vast majority of transient 503
 
 ### Model Fallback (Not Degraded Quality)
 
-After 3 failed Haiku attempts, the worker escalates to Sonnet 4.6 — not as a "cheap fallback" but as a more reliable model. The prompt and output schema are identical. The teacher gets the same quality output; it just costs 3× more for that one request (~₹2.58 instead of ₹0.86).
+If the primary LLM route repeatedly fails, the worker can escalate to a healthier provider or a stronger model. The prompt and output schema stay identical. The teacher gets the same quality target; only that request becomes more expensive.
 
-This happens for a small fraction of requests (Haiku 503 rate is low; Sonnet is used only as exception). The blended average cost barely moves.
+This should happen for a small fraction of requests. The blended average cost barely moves if fallback is treated as an exception path.
 
 **Fallback sequence:**
 ```
-Haiku 4.5 → [503] → retry 1 (1s) → [503] → retry 2 (2s) → [503] → retry 3 (4s) → [503]
-  → escalate to Sonnet 4.6 → [503] → retry 1 → [503] → retry 2
+Primary route -> [503] -> retry 1 (1s) -> [503] -> retry 2 (2s) -> [503] -> retry 3 (4s)
+  -> fallback route -> [503] -> retry 1 -> [503] -> retry 2
     → mark job failed → notify teacher via email/notification
     → offer "retry later" button
 ```
@@ -401,9 +423,9 @@ At 2,000 PPTs/day and ~8 working hours, that's ~4 PPTs/minute. Each PPT takes 10
 
 | Bottleneck | When It Hits | Fix |
 |---|---|---|
-| LLM rate limits | ~500 PPTs/day | Distribute across 2-3 API keys, or use Anthropic's Batch API for queued work |
+| LLM rate limits | ~500 PPTs/day | Distribute across 2-3 provider keys, or use a provider batch API for queued work |
 | Redis memory | ~100K cached entries | Set `maxmemory-policy: allkeys-lru` — evict least-recently-used automatically |
-| File storage (PPTX) | Continuous growth | Store in S3/Cloudflare R2 ($0.015/GB), not local disk. Generate signed time-limited download URLs. |
+| File storage (PPTX) | Continuous growth | Storage adapter supports local demo output and Cloudflare R2 signed downloads. |
 | Worker concurrency | Queue depth growing | BullMQ `concurrency: N` — start at 5, tune up. Each worker can handle N jobs in parallel |
 
 ### Infrastructure Decisions: Now vs Later
@@ -412,7 +434,7 @@ At 2,000 PPTs/day and ~8 working hours, that's ~4 PPTs/minute. Each PPT takes 10
 - Async queue (non-negotiable — this is the foundation)
 - L1 exact cache (30 minutes of work, immediate ROI)
 - Two-process deployment (API + worker)
-- S3/R2 file storage (local disk breaks as soon as you have more than one worker instance)
+- Storage adapter with R2 mode (local disk remains the default demo mode)
 
 **Build at 500 PPTs/day:**
 - L2 semantic cache
@@ -420,7 +442,7 @@ At 2,000 PPTs/day and ~8 working hours, that's ~4 PPTs/minute. Each PPT takes 10
 - Worker autoscaling (BullMQ exposes queue depth metrics; feed them to your hosting platform's autoscaler)
 
 **Build at 2,000 PPTs/day:**
-- Anthropic Batch API integration for non-urgent jobs (50% cost reduction on top of everything else)
+- Provider batch API integration for non-urgent jobs (often meaningful cost reduction on top of everything else)
 - Queue priority tiers: premium teachers get a high-priority queue, free tier goes to standard queue
 - Structured logging + cost dashboard (know exactly what each teacher costs you per month)
 
@@ -441,13 +463,16 @@ Template-first separates the concerns:
 
 ### Slide Templates to Define (in Code)
 
-Define these 5 layouts as JavaScript objects in pptxgenjs. Pre-define all colors, fonts, positions, and sizes:
+Define these 6 layouts as JavaScript objects in pptxgenjs. Pre-define all colors, fonts, positions, and sizes:
 
 1. **`title`** — Large topic title, subtitle, decorative element. Used for slide 1 only.
 2. **`bullet-list`** — Slide title + 4-6 bullet points. Most common layout.
-3. **`two-column`** — Slide title + two content panels side by side. Good for comparisons.
-4. **`content-with-image`** — Left text panel + right image placeholder. Visual.
-5. **`quote-or-definition`** — Large text block with accent styling. Good for key concepts.
+3. **`quiz`** — MCQ cards with Q badges and A/B/C option rows (`quizQuestions[]`).
+4. **`two-column`** — Slide title + two content panels (Prompt / Discuss labels). Good for discussions and comparisons.
+5. **`content-with-image`** — Left text panel + right image/diagram placeholder. Visual.
+6. **`quote-or-definition`** — Framed definition or quote block. Good for key concepts.
+
+**Review-step preview:** The React UI renders approximate 16:9 CSS previews of these layouts in [`frontend/src/components/SlidePreview.tsx`](../frontend/src/components/SlidePreview.tsx) so teachers see structure before async export — aligned with assignment “HTML slide preview” without post-export PPTX editing.
 
 ### The LLM Prompt Structure
 
@@ -462,9 +487,10 @@ Schema:
   "presentationTitle": string,
   "slides": [
     {
-      "slideType": "title" | "bullet-list" | "two-column" | "content-with-image" | "quote-or-definition",
+      "slideType": "title" | "bullet-list" | "quiz" | "two-column" | "content-with-image" | "quote-or-definition",
       "title": string (max 8 words),
       "bullets": string[] (max 5 items, max 12 words each),
+      "quizQuestions": [{ "question": string, "options": string[] }] (quiz only, 2-4 options),
       "bodyText": string (max 40 words),
       "leftContent": string (for two-column only),
       "rightContent": string (for two-column only),
@@ -501,12 +527,12 @@ This separation means the expensive part (system prompt) is cached. The cheap pa
 | Runtime | Node.js 20 LTS | pptxgenjs is JS-native; BullMQ is JS-native; no context switch |
 | Framework | Fastify (not Express) | 2× the throughput of Express for the API server, built-in JSON schema validation |
 | Queue | BullMQ + Redis | Battle-tested, TypeScript-native, handles retries/backoff/concurrency natively, 3.2ms p50 latency under load |
-| LLM (prototype) | Anthropic adapter | One real provider implementation; assignment allows any LLM |
+| LLM (prototype) | OpenAI + Anthropic adapters | Real provider integrations plus mock mode; assignment allows any LLM |
 | LLM (production) | Provider router | Choose OpenAI/Gemini/Anthropic/open-source based on cost, health, and quality |
 | PPTX generation | pptxgenjs | Only mature Node.js PPTX library, no LibreOffice dependency, ~1s per deck |
 | Cache | Redis (same instance) | L1 exact hash; add RediSearch for L2 semantic at scale |
 | File storage | Cloudflare R2 | S3-compatible API, $0.015/GB storage, free egress — cheaper than S3 |
-| Frontend | React + Tailwind | Polling-based status UI; no WebSockets needed at this scale |
+| Frontend | React + Vite | Polling-based status UI; no WebSockets needed at this scale |
 | Hosting | Railway | Supports separate services (API + worker) on free/starter plan; easy Redis add-on |
 | Embeddings (L2 cache) | OpenAI text-embedding-3-small | $0.02/MTok — essentially free for this use case |
 
@@ -533,14 +559,16 @@ savra-gen/
 │           ├── llm.ts
 │           ├── pptx-builder.ts
 │           └── index.ts
-├── packages/shared/            # Shared types (reference)
+├── packages/shared/            # Types, quiz helpers, storage adapter (built to dist/)
 ├── frontend/                   # React app
 │   ├── src/
-│   │   ├── App.tsx
+│   │   ├── App.tsx             # Draft → Review & preview → Export
 │   │   ├── components/
 │   │   │   ├── GenerateForm.tsx
-│   │   │   └── JobStatus.tsx   # Polling component
-│   │   └── api.ts              # API client
+│   │   │   ├── OutlineEditor.tsx
+│   │   │   ├── SlidePreview.tsx
+│   │   │   └── JobStatus.tsx
+│   │   └── api.ts
 │   └── package.json
 │
 ├── docker-compose.yml          # Local: Redis + API + Worker
@@ -553,25 +581,27 @@ savra-gen/
 
 1. **BullMQ requires `maxRetriesPerRequest: null`** on the ioredis connection. Without this, BullMQ throws immediately instead of waiting.
 
-2. **Anthropic prompt caching** requires adding `"cache_control": {"type": "ephemeral"}` to the system prompt block in the API call. The cache TTL is 5 minutes (resets on each hit) or 1 hour (costs 2× to write). For PPT generation where requests cluster during school hours, 5-minute TTL is sufficient.
+2. **Provider prompt caching** should be used where available. For Anthropic, this means adding `"cache_control": {"type": "ephemeral"}` to the system prompt block. Other providers should use their equivalent cached-context feature.
 
-3. **pptxgenjs `writeFile()`** is async and writes to disk. In a worker environment, write to a temp path first, upload to R2, then delete the local file. Never write to the API server's filesystem.
+3. **Shared helpers** live in `packages/shared` for request normalization, cache keys, outline fallback, validation, and storage. The remaining service-local provider adapters should be extracted next if this becomes production code.
 
-4. **BullMQ job data size** should be kept small. Store large payloads (generated slide JSON) in Redis separately and reference by key in the job data. Job data is stored in Redis Sorted Sets — keep it under 1KB.
+4. **pptxgenjs `writeFile()`** is async and writes to disk. In a worker environment, write to a temp path first, upload to R2, then delete the local file. Never write to the API server's filesystem.
 
-5. **Poll interval:** 3 seconds is the right default for the frontend. At 15s average generation time, that's 5 polls per job. WebSockets are not needed and add complexity. If you want push notifications at scale, add Server-Sent Events (SSE) in week 2.
+5. **BullMQ job data size** should be kept small. Store large payloads (generated slide JSON) in Redis separately and reference by key in the job data. Job data is stored in Redis Sorted Sets — keep it under 1KB.
 
-6. **removeOnComplete and removeOnFail:** Always set these on BullMQ workers. A queue doing 2,000 PPTs/day will exhaust Redis memory within days if completed jobs are not purged.
+6. **Poll interval:** 3 seconds is the right default for the frontend. At 15s average generation time, that's 5 polls per job. WebSockets are not needed and add complexity. If you want push notifications at scale, add Server-Sent Events (SSE) in week 2.
+
+7. **removeOnComplete and removeOnFail:** Always set these on BullMQ workers. A queue doing 2,000 PPTs/day will exhaust Redis memory within days if completed jobs are not purged.
    ```
    removeOnComplete: { count: 500, age: 86400 }  // keep last 500 or last 24h
    removeOnFail: { count: 100 }
    ```
 
-7. **Worker concurrency:** Start with `concurrency: 3`. Each job takes 10-15s and is mostly I/O-bound (LLM call + file write). Three concurrent jobs per worker instance is safe without overwhelming the LLM rate limits.
+8. **Worker concurrency:** Start with `concurrency: 3`. Each job takes 10-15s and is mostly I/O-bound (LLM call + file write). Three concurrent jobs per worker instance is safe without overwhelming the LLM rate limits.
 
-8. **Environment variables required:**
+9. **Environment variables required:**
    ```
-   ANTHROPIC_API_KEY
+   OPENAI_API_KEY or ANTHROPIC_API_KEY
    REDIS_URL
    R2_ACCOUNT_ID
    R2_ACCESS_KEY_ID
@@ -585,9 +615,10 @@ savra-gen/
 
 | Failure | System Behavior | Teacher Experience |
 |---|---|---|
-| LLM 503 (transient) | BullMQ retries with backoff | "Still generating..." (no error) |
-| LLM 503 (sustained) | Escalates to Sonnet after 3 Haiku failures | Slight delay, same quality output |
-| Both models down | Job marked failed after all retries | Email notification + "Try again" button |
+| LLM 503 during outline | API returns `template-fallback` editable draft without caching it | Editable outline still appears |
+| LLM 503 during worker generation | BullMQ retries with backoff | "Still generating..." (no error) |
+| LLM 503 (sustained) | Escalates to fallback provider/model, then renders `template-fallback` PPTX if still down | Usable PPTX still downloads |
+| Both models down | Template-fallback path renders deterministic slides | Lower-quality draft, no failed job |
 | Redis down | API falls back to sync LLM call (no queue) | Slower, but still works |
 | Worker crash | BullMQ moves active job back to waiting on reconnect | Job reprocessed automatically |
 | R2/S3 down | PPTX write fails, job retried | Transparent retry |
@@ -609,4 +640,4 @@ The only scenario where the teacher sees an error is if both LLMs are down simul
 
 ---
 
-*This document is complete for use as an implementation brief. The prototype uses Anthropic, but the assignment permits any LLM provider and the production design should route across providers.*
+*This document is complete for use as an implementation brief. The prototype supports OpenAI, Anthropic, and mock mode; the production design should route across providers.*

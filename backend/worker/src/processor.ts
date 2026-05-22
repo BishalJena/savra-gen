@@ -4,8 +4,10 @@ import type { PptJobData, CacheEntry } from './shared';
 import { buildPptx } from './pptx-builder';
 import IORedis from 'ioredis';
 import { generateFreshContent, loadCachedPresentation, storePresentation } from './lib/content-cache';
+import { createStorage } from './storage';
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+const storage = createStorage();
 
 const redis = new IORedis(REDIS_URL, {
   maxRetriesPerRequest: null,
@@ -18,16 +20,19 @@ export async function processJob(job: Job<PptJobData>) {
   const startTime = Date.now();
 
   console.log(`\n[Processor] Starting job ${job.id}: "${chapter}" (Class ${grade}, ${numSlides} slides)`);
+  const filename = `${chapter.replace(/[^a-zA-Z0-9]/g, '_')}_Class${grade}.pptx`;
 
   await job.updateProgress({ step: 'Checking cache...', percent: 10, cached: false });
 
   if (approvedPresentation) {
     await job.updateProgress({ step: 'Rendering teacher-approved slides...', percent: 75, cached: false });
     const filePath = await buildPptx(approvedPresentation, job.id!);
+    const stored = await storage.uploadPptx({ jobId: job.id!, filePath, filename });
     const elapsed = Date.now() - startTime;
     console.log(`[Processor] Job ${job.id} rendered from approved outline in ${elapsed}ms`);
     return {
       filePath,
+      storage: stored,
       tokensUsed: 0,
       costINR: 0,
       model: 'teacher-approved outline',
@@ -46,11 +51,13 @@ export async function processJob(job: Job<PptJobData>) {
         cached: true,
       });
       const filePath = await buildPptx(cached.entry.presentation, job.id!);
+      const stored = await storage.uploadPptx({ jobId: job.id!, filePath, filename });
       const elapsed = Date.now() - startTime;
       const label = cached.source === 'l2' ? 'semantic cache' : 'L1 cache';
       console.log(`[Processor] Job ${job.id} completed from ${label} in ${elapsed}ms`);
       return {
         filePath,
+        storage: stored,
         tokensUsed: 0,
         costINR: 0,
         model: `${cached.entry.model} (${label})`,
@@ -66,17 +73,20 @@ export async function processJob(job: Job<PptJobData>) {
   await job.updateProgress({ step: 'Generating slide content with AI...', percent: 30, cached: false });
 
   const fresh = await generateFreshContent(req);
-  const cacheEntry: CacheEntry = {
-    presentation: fresh.presentation,
-    createdAt: new Date().toISOString(),
-    model: fresh.model,
-    tokensUsed: fresh.tokensUsed,
-  };
-  await storePresentation(redis, req, cacheEntry);
+  if (fresh.cacheable) {
+    const cacheEntry: CacheEntry = {
+      presentation: fresh.presentation,
+      createdAt: new Date().toISOString(),
+      model: fresh.model,
+      tokensUsed: fresh.tokensUsed,
+    };
+    await storePresentation(redis, req, cacheEntry);
+  }
 
   await job.updateProgress({ step: 'Building your presentation...', percent: 85, cached: false });
 
   const filePath = await buildPptx(fresh.presentation, job.id!);
+  const stored = await storage.uploadPptx({ jobId: job.id!, filePath, filename });
   await job.updateProgress({ step: 'Done!', percent: 100, cached: false });
 
   const elapsed = Date.now() - startTime;
@@ -84,6 +94,7 @@ export async function processJob(job: Job<PptJobData>) {
 
   return {
     filePath,
+    storage: stored,
     tokensUsed: fresh.tokensUsed,
     costINR: fresh.costINR,
     model: fresh.model,

@@ -42,10 +42,13 @@ export default function GenerateForm({ onSubmit, disabled }: Props) {
 
   return (
     <div className="form-card">
-      <h2>Draft Presentation</h2>
-      <p className="subtitle">
-        CBSE chapter list for each class and subject. Pick class → subject → chapter.
-      </p>
+      <div className="card-header">
+        <div>
+          <p className="eyebrow">New deck</p>
+          <h2>Lesson details</h2>
+        </div>
+        <span className="count-pill">{numSlides} slides</span>
+      </div>
 
       <form onSubmit={handleSubmit}>
         <div className="form-row">
@@ -128,7 +131,7 @@ export default function GenerateForm({ onSubmit, disabled }: Props) {
             </>
           )}
           {hasCatalog && (
-            <p className="field-hint">{chapterOptions.length} NCERT-aligned chapters for Class {grade} {subject}</p>
+            <p className="field-hint">{chapterOptions.length} chapters available</p>
           )}
         </div>
 
@@ -147,7 +150,7 @@ export default function GenerateForm({ onSubmit, disabled }: Props) {
         </div>
 
         <button type="submit" className="btn-generate" disabled={disabled || !chapter.trim()}>
-          {disabled ? 'Drafting...' : 'Create Editable Draft'}
+          {disabled ? 'Drafting...' : 'Create Draft'}
         </button>
       </form>
     </div>

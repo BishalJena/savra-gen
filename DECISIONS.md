@@ -22,21 +22,21 @@ This document explains the **why** behind every significant technical choice.
 
 **Why:** The assignment does not require generation to be one-shot. Teachers get better output when they can inspect slide titles, bullets, examples, and speaker notes before the expensive final artifact is created. This also makes the product feel faster: the teacher sees useful content immediately instead of waiting behind a spinner.
 
-**Cost impact:** If the teacher accepts or edits the outline, the final worker job renders the approved structured JSON directly with pptxgenjs and uses 0 additional LLM tokens.
+**Cost impact:** If the teacher accepts or edits the outline, the final worker job renders the approved structured JSON directly with pptxgenjs and uses 0 additional LLM tokens after the draft.
 
 **Trade-off:** The flow has one extra interaction. This is intentional for quality-sensitive classroom content. A one-click path can still submit directly to `/api/ppt/generate`.
 
 ---
 
-## 2. Anthropic Adapter for Prototype, Provider-Agnostic Architecture
+## 2. Provider-Agnostic LLM Router
 
-**Decision:** Use Anthropic in the prototype because the SDK is simple and the implementation needs one real LLM adapter, but keep the architecture provider-agnostic.
+**Decision:** Keep content generation behind a provider-agnostic adapter. The prototype supports OpenAI, Anthropic, and mock mode.
 
-**Assignment check:** The assignment says “Integration with any LLM of your choice,” so Anthropic is not required. OpenAI, Gemini, Anthropic, or an open-source model would all satisfy the requirement.
+**Assignment check:** The assignment says “Integration with any LLM of your choice,” so no single vendor is required. OpenAI, Gemini, Anthropic, or an open-source model would all satisfy the requirement.
 
 **Why:** PPT content generation is a structured output task. The important design choice is not the vendor; it is keeping the LLM responsible for concise pedagogical JSON while templates handle layout.
 
-**Future routing:** Production should support a router that chooses provider and model based on latency, cost, quality, and provider health.
+**Future routing:** Production should extract the API and worker adapters into a shared package and choose provider/model based on latency, cost, quality, and provider health.
 
 ---
 
@@ -56,7 +56,7 @@ This document explains the **why** behind every significant technical choice.
 
 **Why:** This is the highest-leverage cost reduction. The previous system likely had the LLM generate layout instructions, color suggestions, and positioning — all of which are wasted tokens. By defining 5 fixed templates in code and having the LLM output only `{ slideType, title, bullets, bodyText }`, we cut output tokens by 60-70%.
 
-**Trade-off:** Less variety in slide design. Mitigated by having 5 distinct layouts and mixing them within each deck.
+**Trade-off:** Less variety in slide design. Mitigated by having 6 distinct layouts (including quiz) and mixing them within each deck.
 
 ---
 
@@ -89,6 +89,36 @@ This document explains the **why** behind every significant technical choice.
 **Decision:** Teachers can insert or remove slides on the outline review page (min 3, max 25).
 
 **Why:** Assignment asks for quality without mandating one-shot generation. Slide-level control matches how teachers actually fix decks. Final validation runs on the edited `presentation` JSON, not the original slide count alone.
+
+---
+
+## 5C. Layout Preview Before Export (Not Post-Export Editing)
+
+**Decision:** Step 2 (Review) shows a **16:9 CSS layout preview** beside the editable slide list. Teachers do not get a full WYSIWYG editor after PPTX download.
+
+**Why:** The assignment allows “HTML slide preview” and template injection — previewing layout before export catches pedagogy and structure issues without building a second editing surface on binary PPTX files. The preview mirrors pptxgenjs templates (title, bullets, quiz cards, two-column, visual, quote) so teachers see approximate styling before async export.
+
+**Trade-off:** Preview is approximate (CSS, not PowerPoint rendering). Good enough for hackathon; production could use Savra’s HTML renderer or thumbnail generation.
+
+---
+
+## 5D. Per-Slide Populate (`POST /api/ppt/slide/populate`)
+
+**Decision:** Teachers describe intent for one slide (e.g. “MCQ on coal between slides 3 and 4”), pick a format (Quiz / Discussion / Definition / Visual), and the API fills that slide using the full deck as context.
+
+**Why:** Inserting a blank slide between existing content is a common classroom workflow. One-slide LLM calls are cheaper than regenerating the whole deck and keep surrounding slides coherent.
+
+**Trade-off:** Extra API surface and LLM call per populate. Format chips only set `slideType` / activity role — intent text stays teacher-authored to avoid overwriting their wording.
+
+---
+
+## 5E. Dedicated Quiz Slide Type
+
+**Decision:** `slideType: "quiz"` with `quizQuestions[]` (structured MCQ) and a dedicated pptxgenjs layout (Q badges, A/B/C option rows).
+
+**Why:** Quiz content in a plain bullet-list produced unreadable PPTX. Structured quiz JSON + template layout matches classroom MCQ decks and keeps LLM output token-efficient.
+
+**Legacy:** Bullet-list slides with quiz-like titles still route to the quiz layout when parsed MCQ content is detected.
 
 ---
 
@@ -126,7 +156,27 @@ This document explains the **why** behind every significant technical choice.
 
 **Why:** Without rate limiting, a single rogue client or script could fill the queue and exhaust LLM rate limits. At 10 req/min, a teacher can generate freely (no one generates 10 PPTs per minute), but automated abuse is blocked.
 
-**Future:** Move to Redis-based sliding window rate limiting when multi-instance deployment requires shared state.
+**Implementation:** Rate limiting now uses Redis `INCR` + TTL keys, so multiple API instances share the same limit window. The in-memory prototype map was removed.
+
+---
+
+## 9A. Redis-Backed Request Deduplication
+
+**Decision:** Store short-lived dedupe reservations in Redis instead of process memory.
+
+**Why:** Multiple API instances must agree that a duplicate request should reuse the first `jobId`. Redis `SET NX EX` gives atomic reservation and a 30-second expiry without adding another database.
+
+**Failure behavior:** If queue insertion fails after reserving a dedupe key, the API releases the reservation so the teacher can retry immediately.
+
+---
+
+## 9B. Storage Adapter Over Hard-Coded Local Disk
+
+**Decision:** Keep local disk as the default demo driver, but route completed PPTX files through a storage adapter that can upload to Cloudflare R2.
+
+**Why:** Local disk is fine for a single-machine prototype. Multi-worker production needs object storage so any API instance can serve a download.
+
+**Trade-off:** R2 requires four environment variables. The public download route remains unchanged.
 
 ---
 

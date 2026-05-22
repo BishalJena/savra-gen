@@ -5,3 +5,7 @@ dist/
 ASSIGNMENT.md
 PITCH_SCRIPT.md
 excalidraw-brief.md
+packages/shared/dist/
+packages/shared/*.js
+packages/shared/*.d.ts
+!packages/shared/package.json
