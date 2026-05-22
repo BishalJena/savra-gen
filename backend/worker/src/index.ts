@@ -1,5 +1,6 @@
 // Worker process entrypoint — runs separately from the API server
 // This is a BullMQ worker that dequeues and processes PPT generation jobs
+import './load-env';
 import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 import { processJob } from './processor';
@@ -58,4 +59,10 @@ process.on('SIGINT', async () => {
 
 console.log(`\n🔧 Savra PPT Worker started (concurrency: ${CONCURRENCY})`);
 console.log(`   Redis: ${REDIS_URL}`);
-console.log(`   Mode: ${process.env.ANTHROPIC_API_KEY ? 'LIVE (Anthropic)' : 'MOCK (no API key)'}\n`);
+const provider = process.env.OPENAI_API_KEY
+  ? `LIVE (OpenAI ${process.env.OPENAI_MODEL || 'gpt-4o-mini'})`
+  : process.env.ANTHROPIC_API_KEY
+    ? 'LIVE (Anthropic)'
+    : 'MOCK (no API key)';
+
+console.log(`   Mode: ${provider}\n`);

@@ -1,8 +1,22 @@
 # Savra PPT Generation — Engineering Architecture Document
 
 **Role:** Full-Stack Engineering Candidate  
-**Scope:** PPT Generation System Redesign  
-**Pricing Data Verified:** May 2026, Anthropic official docs  
+**Scope:** PPT Generation System Redesign ([ASSIGNMENT.md](../ASSIGNMENT.md))  
+**LLM Choice:** OpenAI (chat + L2 embeddings) and Anthropic (chat); assignment allows any provider  
+**Prototype status:** Outline-first async pipeline, L1+L2 cache, CBSE chapter catalog, slide add/delete — see [CHANGELOG.md](../CHANGELOG.md)
+
+**Diagram:** See [`diagram.md`](diagram.md) for Mermaid architecture views (flowchart, sequence, cache layers).
+
+### Submission checklist (assignment §05)
+
+| Deliverable | Location |
+|-------------|----------|
+| Architecture document (Part 1) | This file |
+| System diagram | [`diagram.md`](diagram.md) (Mermaid — renders on GitHub) |
+| Backend | [`backend/`](../backend/) — `api/` HTTP server + `worker/` queue consumer |
+| Frontend UI | [`frontend/`](../frontend/) |
+| Decisions + rationale | [`DECISIONS.md`](../DECISIONS.md) |
+| Pitch / demo script | [`PITCH_SCRIPT.md`](../PITCH_SCRIPT.md) |
 
 ---
 
@@ -10,7 +24,7 @@
 
 The current system has three distinct failure modes, and they share one root cause:
 
-**Root cause:** The system is synchronous. One HTTP request → one LLM call → one blocked teacher. There is no queue, no cache, no fallback logic that doesn't degrade quality, and no separation between content generation and slide building.
+**Root cause:** The system is synchronous and one-shot. One HTTP request → one LLM call → one blocked teacher. There is no reviewable outline, no queue, no cache, no fallback logic that doesn't degrade quality, and no separation between content generation and slide building.
 
 **The three failures:**
 
@@ -26,9 +40,9 @@ Fixing any one of these without addressing the others is cosmetic. This document
 
 ## Part 1 — System Architecture
 
-### The Core Architectural Decision: Async-First
+### The Core Architectural Decision: Outline-First + Async Export
 
-The most important choice in this redesign is moving from synchronous to asynchronous generation. This is not optional — it is the foundation everything else builds on.
+The most important choice in this redesign is moving from synchronous one-shot generation to an outline-first workflow with asynchronous final export. This is not optional — it is the foundation everything else builds on.
 
 **Current (synchronous):**
 ```
@@ -41,26 +55,33 @@ Teacher waits 32 seconds staring at a spinner.
 If the LLM 503s, the teacher gets an error.
 ```
 
-**Proposed (async):**
+**Proposed (outline-first + async):**
 ```
 Teacher submits form
-  → HTTP POST returns in <100ms with a jobId
-    → Teacher sees "Generating your slides..."
-      → Background worker processes the job
-        → Teacher gets notified when done
-Teacher's UI is never blocked. Failures are invisible to the teacher.
+  → API returns editable slide-level draft
+    → Teacher edits titles, bullets, examples, speaker notes
+      → Teacher clicks Generate PPTX
+        → HTTP POST returns in <100ms with a jobId
+          → Background worker renders final PPTX
+Teacher's UI is never blocked, and teachers can correct content before final export.
 ```
 
-This changes the entire failure surface. The teacher never sees a 503. The backend never times out. The system can retry, switch models, and recover — all invisibly.
+This changes the entire failure surface. The teacher never sees a 503. The backend never times out. The system can retry, switch models, and recover — all invisibly. For reviewed drafts, the final export can skip the LLM entirely and render approved structured content.
 
 ---
 
 ### Request Flow (Detailed)
 
 ```
-┌─────────────┐     POST /api/ppt/generate      ┌──────────────────┐
+┌─────────────┐       POST /api/ppt/outline     ┌──────────────────┐
 │   Teacher   │ ──────────────────────────────→ │   API Server     │
-│  (Browser)  │ ←────── { jobId, status }─────  │  (Express/Node)  │
+│  (Browser)  │ ←──── editable slide draft ───  │  (Fastify/Node)  │
+│             │                                  └────────┬─────────┘
+│ edits draft │                                           │
+│             │       POST /api/ppt/generate              │
+│             │ ──────────────────────────────────────────┘
+│             │ ←────── { jobId, status }─────  ┌──────────────────┐
+│             │                                  │   API Server     │
 │             │                                  └────────┬─────────┘
 │  polls every│                                           │ enqueue
 │  3 seconds  │                                           ▼
@@ -73,11 +94,12 @@ This changes the entire failure surface. The teacher never sees a 503. The backe
 │             │                              ┌────────────────────────┐
 │             │                              │      PPT Worker        │
 │             │                              │                        │
-│             │                              │  1. Check L1 cache     │
+│             │                              │  1. Use approved draft │
+│             │                              │     or check L1 cache  │
 │             │                              │     (Redis hash)       │
 │             │                              │  2. Check L2 cache     │
 │             │                              │     (semantic embed)   │
-│             │                              │  3. Call LLM           │
+│             │                              │  3. Call LLM if needed │
 │             │                              │     (Haiku → Sonnet    │
 │             │                              │      fallback)         │
 │             │                              │  4. Build PPTX         │
@@ -91,18 +113,52 @@ This changes the entire failure surface. The teacher never sees a 503. The backe
 
 ### API Contracts
 
+**GET `/api/ppt/chapters?grade=8&subject=Science`**
+
+Returns NCERT-aligned chapter names merged with teacher-submitted chapters (Redis SET).
+
+**POST `/api/ppt/outline`**
+
+Request:
+```json
+{
+  "chapter": "Photosynthesis",
+  "grade": 8,
+  "subject": "Science",
+  "numSlides": 10
+}
+```
+
+(`topic` accepted as deprecated alias for `chapter`.)
+
+Resolution order: **L1 exact cache → L2 semantic cache → LLM (if API key) → template (mock)**.
+
+Response:
+```json
+{
+  "presentation": { "presentationTitle": "...", "slides": [] },
+  "cached": true,
+  "strategy": "l1-cache | l2-semantic | llm | template",
+  "similarityScore": 0.94,
+  "matchedChapter": "Photosynthesis",
+  "estimatedSecondsSaved": 20
+}
+```
+
 **POST `/api/ppt/generate`**
 
 Request:
 ```json
 {
-  "topic": "Photosynthesis",
+  "chapter": "Photosynthesis",
   "grade": 8,
   "subject": "Science",
   "numSlides": 10,
   "language": "en"
 }
 ```
+
+The same endpoint can also accept an approved `presentation` object. In that path, the worker renders directly from the teacher-approved slide JSON instead of making another LLM call.
 
 Response (immediate, <100ms):
 ```json
@@ -157,19 +213,19 @@ That's a very expensive request. The three biggest levers to pull are:
 
 **Lever 1: Model Selection (biggest single change)**
 
-Switch from whatever expensive model is running now to Claude Haiku 4.5 for standard requests.
+Switch from a single expensive default model to a provider-agnostic model router for standard requests.
 
 | Model | Input (per MTok) | Output (per MTok) |
 |---|---|---|
-| Claude Haiku 4.5 | $1.00 | $5.00 |
-| Claude Sonnet 4.6 | $3.00 | $15.00 |
-| Claude Opus 4.6 | $5.00 | $25.00 |
+| Fast structured-output model | Low | Low |
+| Higher-quality model | Medium | Medium |
+| Premium reasoning model | High | High |
 
-Haiku 4.5 is the right primary model for PPT generation. The task is structured content generation with a well-defined schema — it does not require reasoning depth. Sonnet becomes the fallback only when Haiku fails.
+The right primary model is a fast structured-output model. The task is schema-constrained educational content generation, not open-ended reasoning. A higher-quality model becomes the fallback or upgrade path only when complexity or provider health requires it.
 
 **Lever 2: Prompt Caching (90% off repeated input)**
 
-Anthropic's prompt caching reduces cached input token cost by 90% (from $1.00 to $0.10 per MTok on Haiku). The minimum cacheable block is 1,024 tokens for Sonnet/Opus and 2,048 tokens for Haiku.
+Most major providers now offer some form of prompt or context caching. The prototype uses Anthropic cache controls, but the architecture should treat this as a provider capability, not a hard dependency.
 
 The system prompt — which includes the slide schema, formatting rules, grade-level instructions, and output format — is the same for every request. Cache it. This turns a recurring 1,200-token cost into a one-time write + repeated 10% reads.
 
@@ -231,21 +287,21 @@ Caching is the single highest-ROI optimization after the async queue. There are 
 
 **Normalization before hashing:**
 ```
-topic.toLowerCase().trim().replace(/\s+/g, ' ')
+chapter.toLowerCase().trim().replace(/\s+/g, ' ')
 grade (integer)
 subject.toLowerCase().trim()
 numSlides (integer)
 ```
 
-"Class 8 Photosynthesis 10 slides" and "class 8  photosynthesis  10 slides" must produce the same hash. Normalization is critical.
+"Class 8 Photosynthesis 10 slides" and "class 8  photosynthesis  10 slides" must produce the same L1 hash. L2 catches phrasing that L1 misses via embeddings.
 
-**Cache key format:** `ppt:l1:{sha256(topic|grade|subject|numSlides)}`
+**Cache key format:** `ppt:content:l1:{sha256(chapter|grade|subject|numSlides)}`
 
 **What's stored:** The full generated slide JSON (not the PPTX — the PPTX is rebuilt from the JSON on cache hit, which takes ~1s and costs nothing vs the LLM).
 
 **TTL:** 7 days. Curriculum content doesn't change frequently.
 
-**Expected hit rate:** 15-30% (exact duplicates — same topic, grade, slides). Teachers commonly generate the same topics. In EdTech, automated retries and repeated topic requests can push this to 30%.
+**Expected hit rate:** 15-30% (exact duplicates — same chapter, grade, subject, slides). Teachers commonly regenerate the same chapter. In EdTech, automated retries and repeated requests can push this to 30%.
 
 ### Layer 2: Semantic Cache (L2)
 
@@ -258,7 +314,19 @@ numSlides (integer)
 
 **Expected hit rate:** EdTech platforms report 40-45% semantic cache hit rates. Combined with L1, total cache hit rate of 45-55% is realistic.
 
-**Important:** Do not build L2 first. Start with L1 only. It handles 15-30% of requests for nearly zero implementation cost. Add L2 in week 2 after measuring L1 performance.
+**Prototype status:** L1 and L2 are both implemented. L2 uses OpenAI `text-embedding-3-small`, Redis hash index, and brute-force cosine similarity (threshold 0.92, same grade+subject required). Production upgrade: RediSearch KNN when index exceeds ~10K entries.
+
+**Bonus cost answer (10K users, 50% teachers, 2 PPTs/week ≈ 43,333 PPTs/month):**
+
+| Scenario | Monthly LLM cost (approx.) |
+|---|---|
+| Current system @ ₹15/PPT | ₹6,50,000 |
+| New system, no cache | ₹37,267 |
+| L1 ~30% hit | ₹26,087 |
+| L1 + L2 ~40.5% combined hit | ₹22,130 |
+| + 50% teacher-approved export (0 tokens) | ~₹11,065 |
+
+Embedding cost is negligible (~$1/month) vs LLM savings.
 
 ### Cache Invalidation
 
@@ -433,8 +501,8 @@ This separation means the expensive part (system prompt) is cached. The cheap pa
 | Runtime | Node.js 20 LTS | pptxgenjs is JS-native; BullMQ is JS-native; no context switch |
 | Framework | Fastify (not Express) | 2× the throughput of Express for the API server, built-in JSON schema validation |
 | Queue | BullMQ + Redis | Battle-tested, TypeScript-native, handles retries/backoff/concurrency natively, 3.2ms p50 latency under load |
-| LLM (primary) | Claude Haiku 4.5 | $1/$5 per MTok, fast, sufficient for structured JSON generation |
-| LLM (fallback) | Claude Sonnet 4.6 | $3/$15 per MTok, more reliable under load |
+| LLM (prototype) | Anthropic adapter | One real provider implementation; assignment allows any LLM |
+| LLM (production) | Provider router | Choose OpenAI/Gemini/Anthropic/open-source based on cost, health, and quality |
 | PPTX generation | pptxgenjs | Only mature Node.js PPTX library, no LibreOffice dependency, ~1s per deck |
 | Cache | Redis (same instance) | L1 exact hash; add RediSearch for L2 semantic at scale |
 | File storage | Cloudflare R2 | S3-compatible API, $0.015/GB storage, free egress — cheaper than S3 |
@@ -449,31 +517,23 @@ This separation means the expensive part (system prompt) is cached. The cheap pa
 When implementing, use this structure:
 
 ```
-savra-ppt/
-├── apps/
+savra-gen/
+├── architecture/
+│   ├── design-doc.md           # Part 1 (this document)
+│   └── diagram.md              # Mermaid system diagram
+├── backend/
 │   ├── api/                    # Fastify API server
-│   │   ├── src/
-│   │   │   ├── routes/
-│   │   │   │   └── ppt.ts      # POST /generate, GET /job/:id, GET /download/:id
-│   │   │   ├── lib/
-│   │   │   │   ├── queue.ts    # BullMQ queue setup
-│   │   │   │   └── cache.ts    # L1 + L2 cache logic
-│   │   │   └── index.ts        # Fastify app bootstrap
-│   │   └── package.json
-│   │
+│   │   └── src/
+│   │       ├── routes/ppt.ts
+│   │       ├── lib/            # cache, semantic-cache, llm, chapters
+│   │       └── index.ts
 │   └── worker/                 # BullMQ worker (separate process)
-│       ├── src/
-│       │   ├── processor.ts    # Main job handler
-│       │   ├── llm.ts          # Anthropic calls + fallback logic
-│       │   ├── pptx-builder.ts # pptxgenjs template injection
-│       │   └── index.ts        # Worker bootstrap
-│       └── package.json
-│
-├── packages/
-│   └── shared/
-│       ├── types.ts            # Job, SlideData, CacheEntry types
-│       └── templates.ts        # 5 slide layout definitions
-│
+│       └── src/
+│           ├── processor.ts
+│           ├── llm.ts
+│           ├── pptx-builder.ts
+│           └── index.ts
+├── packages/shared/            # Shared types (reference)
 ├── frontend/                   # React app
 │   ├── src/
 │   │   ├── App.tsx
@@ -549,4 +609,4 @@ The only scenario where the teacher sees an error is if both LLMs are down simul
 
 ---
 
-*This document is complete for use as a Claude Code implementation brief. All pricing figures verified against Anthropic's official pricing page (May 2026). BullMQ architecture patterns verified against production case studies. Cache hit rates cited from EdTech-specific production data (Preto.ai, May 2026).*
+*This document is complete for use as an implementation brief. The prototype uses Anthropic, but the assignment permits any LLM provider and the production design should route across providers.*

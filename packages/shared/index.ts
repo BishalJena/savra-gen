@@ -7,6 +7,8 @@ export type {
   SlideData,
   PresentationData,
   CacheEntry,
+  OutlineRequest,
+  GenerateFromOutlineRequest,
 } from './types';
 export { SLIDE_TEMPLATES, COLORS } from './templates';
 export type { SlideTemplate } from './templates';

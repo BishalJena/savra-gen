@@ -1,4 +1,5 @@
-// Shared types for Savra PPT generation system
+// Shared types (inlined from packages/shared for simpler dev resolution)
+import { createHash } from 'crypto';
 
 export interface PptRequest {
   chapter: string;
@@ -22,20 +23,6 @@ export type ContentStrategy =
   | 'llm'
   | 'template'
   | 'teacher-approved';
-
-export interface JobStatusResponse {
-  jobId: string;
-  status: JobStatus;
-  step?: string;
-  progress?: number;
-  cached: boolean;
-  downloadUrl?: string;
-  error?: string;
-  estimatedSeconds?: number;
-  tokensUsed?: number;
-  costINR?: number;
-  createdAt: string;
-}
 
 export interface SlideData {
   slideType: 'title' | 'bullet-list' | 'two-column' | 'content-with-image' | 'quote-or-definition';
@@ -79,7 +66,6 @@ export function normalizeRequest(req: PptRequest): string {
   ].join('|');
 }
 
-/** Parse API body; accepts deprecated `topic` as alias for `chapter`. */
 export function parsePptRequest(body: Record<string, unknown>): PptRequest {
   const chapter = String(body.chapter ?? body.topic ?? '').trim();
   return {
@@ -93,4 +79,14 @@ export function parsePptRequest(body: Record<string, unknown>): PptRequest {
 
 export function buildEmbeddingText(req: PptRequest): string {
   return `grade:${req.grade} subject:${req.subject.toLowerCase().trim()} chapter:${normalizeChapter(req.chapter)} slides:${req.numSlides}`;
+}
+
+export function generateContentCacheKey(req: PptRequest): string {
+  const hash = createHash('sha256').update(normalizeRequest(req)).digest('hex').substring(0, 16);
+  return `ppt:content:l1:${hash}`;
+}
+
+/** @deprecated Use generateContentCacheKey */
+export function generateCacheKey(req: PptRequest): string {
+  return generateContentCacheKey(req);
 }

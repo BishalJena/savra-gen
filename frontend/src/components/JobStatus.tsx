@@ -49,7 +49,7 @@ export default function JobStatus({ jobId, onReset }: Props) {
   if (error) {
     return (
       <div className="status-card">
-        <div className="error-message">⚠️ {error}</div>
+        <div className="error-message">{error}</div>
         <button className="btn-new" onClick={onReset}>Try Again</button>
       </div>
     );
@@ -72,14 +72,14 @@ export default function JobStatus({ jobId, onReset }: Props) {
     <div className="status-card">
       <div className="status-header">
         <h3>
-          {status.status === 'done' ? '🎉 Presentation Ready!' :
-           status.status === 'failed' ? '❌ Generation Failed' :
-           '📝 Generating Presentation'}
+          {status.status === 'done' ? 'Presentation Ready' :
+           status.status === 'failed' ? 'Generation Failed' :
+           'Generating Presentation'}
         </h3>
         <span className={`status-tag ${status.status}`}>
-          {status.status === 'done' ? '✓ DONE' :
+          {status.status === 'done' ? 'Done' :
            status.status === 'failed' ? 'FAILED' :
-           status.status.toUpperCase()}
+           status.status}
         </span>
       </div>
 
@@ -113,7 +113,7 @@ export default function JobStatus({ jobId, onReset }: Props) {
             <div className="stat-item">
               <span className="stat-label">Cache</span>
               <span className={`stat-value ${status.cached ? 'cached' : ''}`}>
-                {status.cached ? '✓ HIT' : 'MISS'}
+                {status.cached ? 'Hit' : 'Miss'}
               </span>
             </div>
           </div>
@@ -139,7 +139,7 @@ export default function JobStatus({ jobId, onReset }: Props) {
               className="btn-download"
               download
             >
-              📥 Download PPTX
+              Download PPTX
             </a>
             <button className="btn-new" onClick={onReset}>
               + New Presentation
@@ -153,7 +153,7 @@ export default function JobStatus({ jobId, onReset }: Props) {
           <div className="error-message">
             {status.error || 'An unexpected error occurred. Please try again.'}
           </div>
-          <button className="btn-new" onClick={onReset}>🔄 Try Again</button>
+          <button className="btn-new" onClick={onReset}>Try Again</button>
         </>
       )}
     </div>

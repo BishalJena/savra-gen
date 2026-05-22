@@ -1,7 +1,8 @@
 // Shared types for Savra PPT generation system
+import { createHash } from 'crypto';
 
 export interface PptRequest {
-  topic: string;
+  chapter: string;
   grade: number;
   subject: string;
   numSlides: number;
@@ -11,23 +12,10 @@ export interface PptRequest {
 export interface PptJobData extends PptRequest {
   cacheKey: string;
   requestedAt: string;
+  approvedPresentation?: PresentationData;
 }
 
 export type JobStatus = 'queued' | 'processing' | 'done' | 'failed';
-
-export interface JobStatusResponse {
-  jobId: string;
-  status: JobStatus;
-  step?: string;
-  progress?: number;
-  cached: boolean;
-  downloadUrl?: string;
-  error?: string;
-  estimatedSeconds?: number;
-  tokensUsed?: number;
-  costINR?: number;
-  createdAt: string;
-}
 
 export interface SlideData {
   slideType: 'title' | 'bullet-list' | 'two-column' | 'content-with-image' | 'quote-or-definition';
@@ -45,6 +33,12 @@ export interface PresentationData {
   slides: SlideData[];
 }
 
+export interface OutlineRequest extends PptRequest {}
+
+export interface GenerateFromOutlineRequest extends PptRequest {
+  presentation: PresentationData;
+}
+
 export interface CacheEntry {
   presentation: PresentationData;
   createdAt: string;
@@ -52,12 +46,24 @@ export interface CacheEntry {
   tokensUsed: number;
 }
 
+export function normalizeChapter(chapter: string): string {
+  return chapter.toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
 export function normalizeRequest(req: PptRequest): string {
-  const normalized = [
-    req.topic.toLowerCase().trim().replace(/\s+/g, ' '),
+  return [
+    normalizeChapter(req.chapter),
     String(req.grade),
     req.subject.toLowerCase().trim().replace(/\s+/g, ' '),
     String(req.numSlides),
   ].join('|');
-  return normalized;
+}
+
+export function buildEmbeddingText(req: PptRequest): string {
+  return `grade:${req.grade} subject:${req.subject.toLowerCase().trim()} chapter:${normalizeChapter(req.chapter)} slides:${req.numSlides}`;
+}
+
+export function generateContentCacheKey(req: PptRequest): string {
+  const hash = createHash('sha256').update(normalizeRequest(req)).digest('hex').substring(0, 16);
+  return `ppt:content:l1:${hash}`;
 }

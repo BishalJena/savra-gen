@@ -16,15 +16,27 @@ This document explains the **why** behind every significant technical choice.
 
 ---
 
-## 2. Claude Haiku 4.5 as Primary Model (Not Sonnet or GPT-4)
+## 1A. Outline-First Over Forced One-Shot Generation
 
-**Decision:** Use Claude Haiku 4.5 ($1/$5 per MTok) as the primary generation model.
+**Decision:** Add a fast editable slide-outline step before final PPTX export.
 
-**Why:** PPT content generation is a structured output task — it doesn't require deep reasoning or chain-of-thought. Haiku handles "generate 10 slides about Photosynthesis as JSON" extremely well. The content quality difference between Haiku and Sonnet for this task type is negligible.
+**Why:** The assignment does not require generation to be one-shot. Teachers get better output when they can inspect slide titles, bullets, examples, and speaker notes before the expensive final artifact is created. This also makes the product feel faster: the teacher sees useful content immediately instead of waiting behind a spinner.
 
-**Cost impact:** Haiku is 3× cheaper on input and 3× cheaper on output vs. Sonnet. At 43K PPTs/month, this saves ~₹50,000/month.
+**Cost impact:** If the teacher accepts or edits the outline, the final worker job renders the approved structured JSON directly with pptxgenjs and uses 0 additional LLM tokens.
 
-**Fallback:** Sonnet 4.6 is the fallback, not a degraded model. If Haiku returns 503s, we escalate to Sonnet, which is *more* reliable (higher rate limits). The teacher gets the same quality; we just pay 3× more for that one request.
+**Trade-off:** The flow has one extra interaction. This is intentional for quality-sensitive classroom content. A one-click path can still submit directly to `/api/ppt/generate`.
+
+---
+
+## 2. Anthropic Adapter for Prototype, Provider-Agnostic Architecture
+
+**Decision:** Use Anthropic in the prototype because the SDK is simple and the implementation needs one real LLM adapter, but keep the architecture provider-agnostic.
+
+**Assignment check:** The assignment says “Integration with any LLM of your choice,” so Anthropic is not required. OpenAI, Gemini, Anthropic, or an open-source model would all satisfy the requirement.
+
+**Why:** PPT content generation is a structured output task. The important design choice is not the vendor; it is keeping the LLM responsible for concise pedagogical JSON while templates handle layout.
+
+**Future routing:** Production should support a router that chooses provider and model based on latency, cost, quality, and provider health.
 
 ---
 
@@ -32,7 +44,7 @@ This document explains the **why** behind every significant technical choice.
 
 **Decision:** Use Fastify instead of Express for the API server.
 
-**Why:** Fastify provides 2-5× higher throughput than Express in benchmarks. More importantly, it has built-in JSON schema validation, which means we validate request bodies (topic, grade, numSlides) at the framework level — no additional middleware needed. The pino-based logging is also superior.
+**Why:** Fastify provides 2-5× higher throughput than Express in benchmarks. More importantly, it has built-in JSON schema validation, which means we validate request bodies (chapter, grade, subject, numSlides) at the framework level — no additional middleware needed. The pino-based logging is also superior.
 
 **Trade-off:** Smaller ecosystem than Express. But for an API server with 4 routes, the Express middleware ecosystem is irrelevant.
 
@@ -50,11 +62,33 @@ This document explains the **why** behind every significant technical choice.
 
 ## 5. Two-Layer Caching (L1 Exact + L2 Semantic)
 
-**Decision:** Implement L1 exact-match caching first (Redis hash), with L2 semantic caching as a later optimization.
+**Decision:** Implement L1 exact-match caching on `class|subject|chapter|slides`, plus L2 semantic similarity via OpenAI `text-embedding-3-small` and cosine search in Redis (prototype: brute-force over ≤5K index entries).
 
 **Why:** L1 is trivial to implement (30 minutes of work) and catches 15-30% of requests — teachers commonly regenerate the same topic. L2 semantic caching catches another 15-25% (e.g., "Class 8 Photosynthesis" vs "Grade 8 Photosynthesis"), but requires embeddings and vector search. Building L1 first gives immediate ROI.
 
 **Implementation note:** We cache the *JSON content*, not the PPTX file. Rebuilding PPTX from JSON takes ~1 second with pptxgenjs and costs nothing. This keeps cache storage small.
+
+**L2 prototype:** OpenAI embeddings stored in Redis; brute-force cosine over an index (≤5K entries). Same `grade` + `subject` required before similarity match. Threshold 0.92 (stricter when slide counts differ). Stats exposed on `GET /api/ppt/stats`.
+
+**Production path:** RediSearch vector KNN when the index grows; same payload format.
+
+---
+
+## 5A. CBSE Chapter Catalog (Indian Market UX)
+
+**Decision:** Form order is **class → subject → chapter**. Chapter names come from a static NCERT-aligned catalog ([`cbse-chapters.ts`](backend/api/src/lib/cbse-chapters.ts)), merged with teacher-entered chapters in Redis.
+
+**Why:** Savra serves Indian schools; teachers do not think in anonymous “topics.” CBSE textbooks change slowly — shipping chapter lists improves dropdown UX, cache key stability, and demo credibility. `GET /api/ppt/chapters` powers the frontend select; “Other chapter” remains for edge cases.
+
+**Trade-off:** Catalog maintenance over time (annual NCERT refresh). Acceptable for hackathon; production would sync from Savra’s curriculum DB.
+
+---
+
+## 5B. Slide Add/Delete on Review Screen
+
+**Decision:** Teachers can insert or remove slides on the outline review page (min 3, max 25).
+
+**Why:** Assignment asks for quality without mandating one-shot generation. Slide-level control matches how teachers actually fix decks. Final validation runs on the edited `presentation` JSON, not the original slide count alone.
 
 ---
 
@@ -72,7 +106,7 @@ This document explains the **why** behind every significant technical choice.
 
 ## 7. Request Deduplication
 
-**Decision:** If the same request (same topic + grade + subject + numSlides) is submitted within 30 seconds, return the existing jobId instead of creating a new job.
+**Decision:** If the same request (same chapter + grade + subject + numSlides, or same approved presentation hash) is submitted within 30 seconds, return the existing jobId instead of creating a new job.
 
 **Why:** Teachers double-click. Form resubmissions happen. Without deduplication, each click creates a new LLM call. With deduplication, the second click is free and returns instantly.
 
@@ -103,6 +137,14 @@ This document explains the **why** behind every significant technical choice.
 | **WebSockets** | Polling every 3s is sufficient. WebSockets add deployment complexity. |
 | **PostgreSQL database** | Not needed for the prototype. Job state lives in Redis (via BullMQ). Add PostgreSQL for user/teacher/school models in a full system. |
 | **PDF download** | Requires LibreOffice headless in a separate container. Out of scope for a prototype. |
-| **L2 semantic cache** | Described in the architecture doc. L1 is sufficient for the prototype demo. |
+| **RediSearch KNN** | L2 implemented with brute-force cosine; vector index at scale. |
 | **Authentication** | Assumed to exist in Savra's current system. Not relevant to PPT generation redesign. |
-| **PPTX-to-PDF conversion** | LibreOffice is heavy and memory-intensive. Document this as a future service. |
+| **PPTX-to-PDF conversion** | Assignment mentions PDF; LibreOffice sidecar out of scope for prototype. |
+
+---
+
+## 11. Repository Layout (Assignment §05)
+
+**Decision:** `backend/api` + `backend/worker` + `frontend/` — matches assignment `backend/` and `frontend/` folders.
+
+**Why:** Worker stays a separate Node process under `backend/worker` for isolation and independent scale. HTTP API lives in `backend/api`. System diagram is Mermaid in [`architecture/diagram.md`](architecture/diagram.md) (renders on GitHub without a PNG export step).

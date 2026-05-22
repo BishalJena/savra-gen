@@ -1,10 +1,28 @@
 const API_BASE = '/api';
 
 export interface GenerateRequest {
-  topic: string;
+  chapter: string;
   grade: number;
   subject: string;
   numSlides: number;
+}
+
+export type SlideType = 'title' | 'bullet-list' | 'two-column' | 'content-with-image' | 'quote-or-definition';
+
+export interface SlideData {
+  slideType: SlideType;
+  title: string;
+  bullets?: string[];
+  bodyText?: string;
+  leftContent?: string;
+  rightContent?: string;
+  quoteText?: string;
+  speakerNote?: string;
+}
+
+export interface PresentationData {
+  presentationTitle: string;
+  slides: SlideData[];
 }
 
 export interface GenerateResponse {
@@ -13,6 +31,15 @@ export interface GenerateResponse {
   estimatedSeconds: number;
   pollUrl: string;
   deduplicated?: boolean;
+}
+
+export interface OutlineResponse {
+  presentation: PresentationData;
+  cached: boolean;
+  strategy: string;
+  similarityScore?: number;
+  matchedChapter?: string;
+  estimatedSecondsSaved: number;
 }
 
 export interface JobStatusResponse {
@@ -30,7 +57,30 @@ export interface JobStatusResponse {
   createdAt: string;
 }
 
-export async function submitGeneration(data: GenerateRequest): Promise<GenerateResponse> {
+export async function fetchChapters(grade: number, subject: string): Promise<string[]> {
+  const params = new URLSearchParams({ grade: String(grade), subject });
+  const res = await fetch(`${API_BASE}/ppt/chapters?${params}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.chapters || [];
+}
+
+export async function draftOutline(data: GenerateRequest): Promise<OutlineResponse> {
+  const res = await fetch(`${API_BASE}/ppt/outline`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Request failed' }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function submitGeneration(
+  data: GenerateRequest & { presentation?: PresentationData },
+): Promise<GenerateResponse> {
   const res = await fetch(`${API_BASE}/ppt/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
